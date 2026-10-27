@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Library Manager</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside>
+    <div class="brand"><b>Library Manager</b><span>CS543 &middot; GraphQL + MySQL</span></div>
+    <small>Catalogue</small>
+    <a data-nav="books">Books</a>
+    <a data-nav="authors">Authors</a>
+    <a data-nav="genres">Genres</a>
+  </aside>
+  <main id="main"></main>
+  <div id="toast"></div>
+
+  <script>
+    const API = 'http://localhost:4000/';
+
+    // ---------- helpers ----------
+    // send a GraphQL query/mutation with fetch()
+    async function gql(query, variables) {
+      const res = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables }) });
+      const json = await res.json();
+      if (json.errors) throw new Error(json.errors[0].message);
+      return json.data;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const $ = id => document.getElementById(id);
+    const main = $('main');
+    const tags = l => l.length ? l.map(g => `<span class="tag">${esc(g.name)}</span>`).join('') : '&mdash;';
+
+    let toastTimer;
+    function toast(msg, isErr) {
+      const t = $('toast'); t.textContent = msg; t.className = 'show' + (isErr ? ' err' : '');
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = '', 2800);
+    }
+
+    // ---------- page building blocks ----------
+    function listPage(kind, title, sub, addLabel, heads, rows) {
+      main.dataset.kind = kind;
+      main.innerHTML = `
+        <div class="head"><div><h1>${title}</h1><p>${sub}</p></div>
+          <button class="btn" onclick="show('${kind}Form')">${addLabel}</button></div>
+        <div class="card">
+          <div class="tools"><input type="text" id="q" placeholder="Search ${title.toLowerCase()}&hellip;"></div>
+          <table><thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}<th></th></tr></thead>
+          <tbody>${rows.join('')}</tbody></table>
+          ${rows.length ? '' : '<div class="empty">Nothing here yet.</div>'}
+        </div>`;
+      $('q').oninput = e => {   // live search: hide rows that do not match
+        const q = e.target.value.toLowerCase();
+        main.querySelectorAll('tbody tr').forEach(r => r.hidden = !r.textContent.toLowerCase().includes(q));
+      };
+    }
+    const row = (id, name, cells) => `<tr data-id="${id}" data-name="${esc(name)}">
+      ${cells.map(c => `<td>${c}</td>`).join('')}
+      <td class="act"><button class="link" data-act="edit">Edit</button><button class="link del" data-act="del">Delete</button></td></tr>`;
+
+    function formPage(kind, title, sub, fields, id) {
+      main.dataset.kind = '';
+      main.innerHTML = `
+        <div class="head"><div><h1>${id ? 'Edit' : 'Add'} ${title}</h1><p>${sub}</p></div></div>
+        <div class="card"><form id="f" class="form">${fields}
+          <div class="actions"><button class="btn">${id ? 'Save changes' : 'Save'}</button>
+          <button type="button" class="btn ghost" onclick="show('${kind}s')">Cancel</button></div></form></div>`;
+    }
+    const field = (label, html) => `<div class="field"><label class="t">${label}</label>${html}</div>`;
+    const val = id => $(id).value.trim();
+
+    // run the mutation when the form is submitted, then go back to the list
+    function onSave(kind, fn, okMsg) {
+      $('f').onsubmit = async e => {
+        e.preventDefault();
+        try { await fn(); toast(okMsg); show(kind + 's'); } catch (err) { toast(err.message, true); }
+      };
+    }
+
+    // ---------- pages ----------
+    const views = {
+      // READ
+      async books() {
+        const d = await gql(`{ books { id title year author { name } genres { name } } }`);
+        listPage('book', 'Books', 'All books in the catalogue.', 'Add book', ['Title', 'Author', 'Year', 'Genres'],
+          d.books.map(b => row(b.id, b.title, [`<b>${esc(b.title)}</b>`, esc(b.author.name), b.year ?? '&mdash;', tags(b.genres)])));
+      },
+      async authors() {
+        const d = await gql(`{ authors { id name country books { id } } }`);
+        listPage('author', 'Authors', 'People who have written books.', 'Add author', ['Name', 'Country', 'Books'],
+          d.authors.map(a => row(a.id, a.name, [`<b>${esc(a.name)}</b>`, esc(a.country) || '&mdash;', a.books.length])));
+      },
+      async genres() {
+        const d = await gql(`{ genres { id name books { id } } }`);
+        listPage('genre', 'Genres', 'Categories used to group books.', 'Add genre', ['Genre', 'Books'],
+          d.genres.map(g => row(g.id, g.name, [`<b>${esc(g.name)}</b>`, g.books.length])));
+      },
+
+      // CREATE + UPDATE (the same form is used for both; id is set when editing)
+      async bookForm(id) {
+        const d = await gql(`{ authors { id name } genres { id name } books { id title year author { id } genres { id } } }`);
+        const b = id ? d.books.find(x => x.id == id) : null;
+        const mine = b ? b.genres.map(g => g.id) : [];
+        formPage('book', 'book', 'Fill in the details below.',
+          field('Title', `<input type="text" id="title" required value="${esc(b?.title)}">`) +
+          field('Author', `<select id="authorId" required><option value="">Select author</option>` +
+            d.authors.map(a => `<option value="${a.id}" ${b && b.author.id == a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('') + `</select>`) +
+          field('Year', `<input type="number" id="year" style="width:120px" value="${b?.year ?? ''}">`) +
+          field('Genres', `<div class="checks" id="genreBox">` + d.genres.map(g =>
+            `<label><input type="checkbox" value="${g.id}" ${mine.includes(g.id) ? 'checked' : ''}> ${esc(g.name)}</label>`).join('') + `</div>`), id);
+        onSave('book', () => {
+          const genreIds = [...document.querySelectorAll('#genreBox input:checked')].map(c => c.value);
+          const y = val('year'), v = { t: val('title'), y: y === '' ? null : Number(y), a: val('authorId'), g: genreIds };
+          return id
+            ? gql(`mutation($id:ID!,$t:String!,$y:Int,$a:ID!,$g:[ID!]){ updateBook(id:$id,title:$t,year:$y,authorId:$a,genreIds:$g){ id } }`, { ...v, id })
+            : gql(`mutation($t:String!,$y:Int,$a:ID!,$g:[ID!]){ addBook(title:$t,year:$y,authorId:$a,genreIds:$g){ id } }`, v);
+        }, id ? 'Book updated.' : 'Book added.');
+      },
+      async authorForm(id) {
+        const a = id ? (await gql(`{ authors { id name country } }`)).authors.find(x => x.id == id) : null;
+        formPage('author', 'author', 'Fill in the details below.',
+          field('Name', `<input type="text" id="name" required value="${esc(a?.name)}">`) +
+          field('Country', `<input type="text" id="country" value="${esc(a?.country)}">`), id);
+        onSave('author', () => {
+          const v = { n: val('name'), c: val('country') || null };
+          return id
+            ? gql(`mutation($id:ID!,$n:String!,$c:String){ updateAuthor(id:$id,name:$n,country:$c){ id } }`, { ...v, id })
+            : gql(`mutation($n:String!,$c:String){ addAuthor(name:$n,country:$c){ id } }`, v);
+        }, id ? 'Author updated.' : 'Author added.');
+      },
+      async genreForm(id) {
+        const g = id ? (await gql(`{ genres { id name } }`)).genres.find(x => x.id == id) : null;
+        formPage('genre', 'genre', 'Genre names must be unique.',
+          field('Name', `<input type="text" id="name" required value="${esc(g?.name)}">`), id);
+        onSave('genre', () => id
+          ? gql(`mutation($id:ID!,$n:String!){ updateGenre(id:$id,name:$n){ id } }`, { id, n: val('name') })
+          : gql(`mutation($n:String!){ addGenre(name:$n){ id } }`, { n: val('name') }), id ? 'Genre updated.' : 'Genre added.');
+      },
+    };
+
+    // show a page and highlight its menu item
+    async function show(name, id) {
+      const list = name.replace('Form', '') + (name.endsWith('Form') ? 's' : '');
+      document.querySelectorAll('aside a').forEach(a => a.classList.toggle('on', a.dataset.nav === list));
+      try { await views[name](id); }
+      catch (err) { main.innerHTML = `<div class="card form"><b>Cannot reach the API.</b><p>${esc(err.message)}</p>
+        <p>Check that <code>node server.js</code> is running on port 4000.</p></div>`; }
+    }
+    document.querySelectorAll('aside a').forEach(a => a.onclick = () => show(a.dataset.nav));
+
+    // Edit / Delete buttons inside the tables
+    main.addEventListener('click', async e => {
+      const btn = e.target.closest('button[data-act]'); if (!btn) return;
+      const tr = btn.closest('tr'), kind = main.dataset.kind, id = tr.dataset.id, name = tr.dataset.name;
+      if (btn.dataset.act === 'edit') return show(kind + 'Form', id);
+
+      const extra = kind === 'author' ? '\n\nAll books by this author will be deleted too.' : '';
+      if (!confirm(`Delete "${name}"?${extra}\n\nThis cannot be undone.`)) return;
+      try {
+        const m = { book: 'deleteBook', author: 'deleteAuthor', genre: 'deleteGenre' }[kind];
+        await gql(`mutation($id:ID!){ ${m}(id:$id) }`, { id });
+        toast('Deleted.'); show(kind + 's');
+      } catch (err) { toast(err.message, true); }
+    });
+
+    show('books');
+  </script>
+</body>
+</html>
